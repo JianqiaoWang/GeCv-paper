@@ -33,3 +33,189 @@ Simu/
   Simu/Main_CON.R
   - for the give genotype file and phenotype file, main codes for simulation.
 
+
+** Next we gives an example of how we conduct the simulation based on the proposed method** 
+
+ First we import the functions and packages needed.
+
+```{r, warning= F, message= FALSE}
+library(bigsnpr)
+library(data.table)
+library(dplyr)
+library(tidyverse)
+library(parallel)
+library(glmnet)
+
+source("./Simu/GeCr.R")
+source("./Simu/Misc.R")
+source("./Simu/GeCv_bigsnpr.R")
+source("./Simu/CoefGen.R")
+
+```
+
+To conduct the simulations with the bigsnpr and bigstatsr package, we need to convert the genotype data (usuall) to the require format. We refer the readers to tutorials of two packages for more details. Here we just use the genotype data from the package directly.
+
+
+```{r}
+geno <- snp_attachExtdata()
+dim(geno$genotypes)
+G = geno$genotypes
+```
+
+
+Set the simulation parameters
+
+```{r}
+#--------------  parameter setting:  generating the coefficients ----------------
+prop.beta = 0.01 ; prop.gamma = 0.01; prop.o=0.01;
+GeCovaraince = 0.2; mixedcoef ="normal"; overlap = "overlap";
+H1 <- 0.4; H2 = 0.4; prop.gamma = prop.beta
+#--------------  parameter setting:  generating the outcomes ----------------
+rho = 0.4; h2.Y = H1;  h2.Z = H2; Var.Z = 1;  Var.Y = 1;
+sd.ep1 = sqrt(Var.Y * (1 - h2.Y))
+sd.ep2 = sqrt(Var.Z * (1 - h2.Z))
+```
+
+
+Generate coefficients based on the chosen causal variants
+
+```{r}
+index1 = seq(1, dim(G)[2], by = 10)
+geno.mat = G[, index1]; K = ncol(geno.mat);
+d1 = round( (prop.beta - prop.o) * K) ;
+d2 = round( (prop.gamma - prop.o) * K);
+d3 = round( prop.o * K); X <-rep(0, K);
+X[sample(1:round(K/3), d1 )] = 1
+X[sample(round(2*K/3):K, d2)] = 2
+X[sample(which(X ==0), d3 )] = 3
+Coef = Coef.Prop.new(X = X, geno = geno.mat,   h2.Y,
+                     sigma3 =  sqrt(prop.beta/prop.o * 0.4),
+                     h2.Z, GeCovaraince)
+pr_Y = geno.mat %*% Coef$Beta
+pr_Z = geno.mat %*% Coef$Gamma1
+
+```
+
+
+Generate the outcomes
+
+```{r}
+temp = mvtnorm::rmvnorm(nrow(geno.mat), mean = rep(0,2),
+                          sigma = matrix(c(sd.ep1^2, rho*sd.ep1*sd.ep2, 
+                                           rho*sd.ep1*sd.ep2, sd.ep2^2),2,2))
+Y = pr_Y + temp[,1]; Y = as.vector(Y); Z = pr_Z + temp[,2]; Z = as.vector(Z)
+
+```
+
+Fit the regression model based on the glmnet:cv.glmnet
+
+```{r}
+  geno = G[]
+  fam <- if(all(Y %in% 0:1)) "binomial" else "gaussian"
+  fit1 = glmnet::cv.glmnet( y =Y, x = geno, intercept = T, family=fam, nfolds = 10, parallel = T)
+  Y.hat = as.vector(predict(fit1, newx = geno, s = "lambda.min")); eps.hat = Y - Y.hat
+  
+  # --------------------------------------------------------------------------------
+  fit2 = glmnet::cv.glmnet(y =Z, x = geno, intercept = T, family=fam, nfolds = 10, parallel = T)
+  Z.hat = as.vector(predict(fit2, newx =  geno, s = "lambda.min"));  v.hat = Z - Z.hat
+  
+  #-------------- Estimate the Y.hat, Z.hat, eps.hat, v.hat ----------------------
+  n.y = sum(!is.na(eps.hat)); n.z = sum(!is.na(v.hat));
+  eps.hat[is.na(eps.hat)] = 0; v.hat[is.na(v.hat)] = 0;
+  GePa= GeCr$new(N.Y = n.y, N.Z = n.z, Y.hat = Y.hat, 
+                 Z.hat = Z.hat, eps.hat = eps.hat, v.hat = v.hat)
+  result = data.frame(h2.beta.est = GePa$h2.beta.est, 
+                      h2.beta.se = GePa$h2.beta.est.se, 
+             h2.gamma.est = GePa$h2.gamma.est, h2.gamma.se = GePa$h2.gamma.est.se,
+             GeCv = GePa$GeCv.est, GeCv.SE = GePa$GeCv.est.se)
+  
+  print(result) # correponding estimates of heritability of two traits and their SE
+
+```
+
+For the overlapping samples, we also consider the bias modification for the confidence interval estimates of the genetic covariance
+
+First calculate the s.y, s.z, and s.yz (s_o in the main text)
+```{r}
+
+CalS0 = function(X.beta, X.gamma){
+  
+  Omega.X.beta = solve( (crossprod(X.beta, X.beta) + 0.00001 * diag(ncol(X.beta))) ) # s_beta \times s_\beta
+  
+  Omega.X.gamma = solve( (crossprod(X.gamma, X.gamma)+ 0.0001 * diag(ncol(X.gamma))) ) # s_gamma \times s_\gamma
+  
+  Cov.beta.gamma = (crossprod(X.beta, X.gamma)) # s_beta \times s_\gamma
+  
+  Mat1 = Omega.X.beta %*% Cov.beta.gamma 
+  
+  Mat2 =  Omega.X.gamma %*% t(Cov.beta.gamma)
+  
+  return( sum(diag(Mat1 %*% Mat2)) )
+}
+
+beta.coef = coef(fit1, s= "lambda.min")
+gamma.coef =  coef(fit2, s= "lambda.min")
+s.y = sum(coef(fit1, s= "lambda.min") != 0)
+s.z = sum(coef(fit2, s= "lambda.min") != 0)
+# not including the intercept
+if(s.y != 0 & s.z != 0 ){
+    X.beta =  as.matrix( G[ ,which( as.numeric(beta.coef) != 0) ])
+    X.gamma =  as.matrix(G[ ,which( as.numeric(gamma.coef) != 0)])
+    s.yz = CalS0(X.beta, X.gamma)
+}else{
+    s.yz = 0
+}
+```
+
+Calculate the bias term and calculate the confidence interval term 
+
+```{r}
+cov.eps.v = cov(eps.hat, v.hat, use = "pairwise.complete.obs")
+zeta.Y = 1 - s.y/n.y
+zeta.Z = 1 - s.z/n.z
+eta.Y = (1/(zeta.Y * zeta.Y) - s.y/n.y -  1 )
+eta.Z = (1/(zeta.Z * zeta.Z) - s.z/n.z -  1 )
+eta.cov = (0.5* (zeta.Y^(-2)+  zeta.Z^(-2)) - (s.yz) /(sqrt(n.y * n.z) - s.yz)   -1 )
+GeCv.bias = eta.cov *cov.eps.v;
+result = as.data.frame(result)
+result$GeCv.bias = GeCv.bias
+CI.lower = result$GeCv - 1.96 * result$GeCv.SE - pmax(result$GeCv.bias, 0)
+CI.upper = result$GeCv + 1.96 * result$GeCv.SE + pmax(-result$GeCv.bias, 0)
+cat(paste0("The adjusted confidence interval is [", CI.lower, "," ,CI.upper, "]"    ))
+```
+
+**Remark**  R package {bigstatsr} provides efficient penalized (linear and logistic) regressions using functions big_spLinReg() and big_spLogReg()  (https://privefl.github.io/bigstatsr/articles/penalized-regressions.html). We add the cross-validation feature to the function and use it for the large scale gwas simulation in the main paper; The code could be found in author's github. An  example of Code is given as follows (also seen in the R code):
+
+```{r eval = F}
+
+FUN.1 <- if (all(Y1.train %in% 0:1)) big_spLogReg.cv else big_spLinReg.cv
+FUN.2 <- if (all(Y2.train %in% 0:1)) big_spLogReg.cv else big_spLinReg.cv
+
+fit1 = FUN.1(
+  X = G,
+  Y1.train,
+  ind.train = ind.train.Y1,
+  alphas = 1,
+  power_scale = 1,
+  power_adaptive = 0,
+  K = 10,
+  ncores = ncores)
+
+Y.hat = predict(fit1, X = G, ind.row = ind)
+
+fit2 = FUN.2(
+  X = G,
+  Y2.train,
+  ind.train = ind.train.Y2,
+  alphas = 1,
+  power_scale = 1,
+  power_adaptive = 0,
+  K = 10,
+  ncores = ncores)
+b <- Sys.time()
+
+```
+
+
+
+
