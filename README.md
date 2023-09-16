@@ -184,7 +184,7 @@ CI.upper = result$GeCv + 1.96 * result$GeCv.SE + pmax(-result$GeCv.bias, 0)
 cat(paste0("The adjusted confidence interval is [", CI.lower, "," ,CI.upper, "]"    ))
 ```
 
-**Remark**  R package {bigstatsr} provides efficient penalized (linear and logistic) regressions using functions big_spLinReg() and big_spLogReg()  (https://privefl.github.io/bigstatsr/articles/penalized-regressions.html). We add the cross-validation feature to the function and use it for the large scale gwas simulation in the main paper; The code could be found in author's github. An  example of Code is given as follows (also seen in the R code):
+**Remark**  R package {bigstatsr} provides efficient penalized (linear and logistic) regressions using functions big_spLinReg() and big_spLogReg()  (https://privefl.github.io/bigstatsr/articles/penalized-regressions.html). We add the cross-validation feature to the function and use it for the large-scale gwas simulation in the main paper; The code could be found in author's github https://github.com/JianqiaoWang/bigstatsr . An  example of Code is given as follows (also seen in the R code):
 
 ```{r eval = F}
 
